@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<style>
+	table { border-collapse: collapse; }
+	th, td { padding: 2px 16px 2px 0; text-align: left; font-family: monospace; }
+	tr:hover { background: #f0f0f0; }
+	</style>
+</head>
+<body>
+	{{template "navbar" .Navbar}}
+
+	<h1>Index of {{.PWD}}</h1>
+
+	<table>
+		<tr><th>Name</th><th>Last modified</th><th>Size</th></tr>
+		{{if .HasParent}}
+		<tr><td><a href="{{.ParentHref}}">../</a></td><td></td><td></td></tr>
+		{{end}}
+		{{range .Entries}}
+		<tr><td><a href="{{.Href}}">{{.Name}}</a></td><td>{{.ModTime}}</td><td>{{.SizeStr}}</td></tr>
+		{{end}}
+	</table>
+</body>
+</html>

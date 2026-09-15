@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head>
+        <style>
+        </style>
+</head>
+<body>
+        {{template "navbar" .Navbar}}
+
+        <div>Contact: <a href="mailto:{{.Email}}">{{.Email}}</a></div>
+
+        <script>
+let page = {{.}};
+        </script>
+</body>
+</html>
