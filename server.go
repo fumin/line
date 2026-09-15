@@ -1,18 +1,25 @@
 package line
 
 import (
+	"bytes"
+	"cmp"
+	"crypto/rand"
+	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"html"
+	"html/template"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
-	"sort"
+	"slices"
 	"strconv"
-	"text/template"
+	"sync"
+	"time"
 
 	"github.com/pkg/errors"
 
@@ -26,8 +33,13 @@ var staticFS embed.FS
 const (
 	PathLineWebhook  = "/LineWebhook"
 	PathAbout        = "/About"
-	PathViewData     = "/ViewData"
+	PathReadDir      = "/ReadDir"
 	PathServeContent = "/ServeContent"
+	PathLogin        = "/Login"
+	PathDoLogin      = "/DoLogin"
+	PathLogout       = "/Logout"
+
+	cookieSessionID = "sessionID"
 )
 
 type Server struct {
@@ -35,16 +47,49 @@ type Server struct {
 
 	Root *os.Root
 
+	sessionMu    sync.RWMutex
+	sessionToken string
+
 	Webhook *WebhookHandler
 
 	ServeMux *http.ServeMux
 	Server   http.Server
 }
 
+func newSessionToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", errors.Wrap(err, "")
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// currentSessionToken returns the token that a valid "sessionID" cookie
+// must currently match.
+func (s *Server) currentSessionToken() string {
+	s.sessionMu.RLock()
+	defer s.sessionMu.RUnlock()
+	return s.sessionToken
+}
+
+// rotateSessionToken replaces the session token with a fresh random one,
+// invalidating every outstanding "sessionID" cookie (used by Logout, and
+// at startup).
+func (s *Server) rotateSessionToken() error {
+	token, err := newSessionToken()
+	if err != nil {
+		return errors.Wrap(err, "")
+	}
+	s.sessionMu.Lock()
+	s.sessionToken = token
+	s.sessionMu.Unlock()
+	return nil
+}
+
 func NewServer(cfg config.Config) (*Server, error) {
 	s := &Server{C: cfg}
 
-	if err := os.MkdirAll(cfg.Dir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.Dir, 0700); err != nil {
 		return nil, errors.Wrap(err, "")
 	}
 	var err error
@@ -53,20 +98,33 @@ func NewServer(cfg config.Config) (*Server, error) {
 		return nil, errors.Wrap(err, "")
 	}
 
+	if err := s.rotateSessionToken(); err != nil {
+		return nil, errors.Wrap(err, "")
+	}
+
+	client := NewClient(cfg.Secret.LineChannelAccessToken)
 	s.Webhook = &WebhookHandler{
 		ChannelSecret: cfg.Secret.LineChannelSecret,
-		Names:         NewNameCache(NewClient(cfg.Secret.LineChannelAccessToken)),
-		Writer:        NewLogWriter(cfg.Dir),
+		Client:        client,
+		Names:         NewNameCache(client),
+		Writer:        NewLogWriter(s.Root),
 	}
 
 	s.ServeMux = http.NewServeMux()
 	s.Server.Addr = s.C.Addr
 	s.Server.Handler = s.ServeMux
+	s.Server.ReadHeaderTimeout = 10 * time.Second
+	s.Server.ReadTimeout = 30 * time.Second
+	s.Server.WriteTimeout = 30 * time.Second
+	s.Server.IdleTimeout = 120 * time.Second
+
 	s.ServeMux.Handle("/static/", http.FileServer(http.FS(staticFS)))
 	s.ServeMux.Handle(PathLineWebhook, s.Webhook)
-	handleFunc(s, "/Login", Login)
+	handleFunc(s, PathLogin, Login)
+	handleFunc(s, PathDoLogin, DoLogin)
+	handleFunc(s, PathLogout, Logout)
 	handleFunc(s, PathAbout, About)
-	handleFunc(s, PathViewData, ViewData)
+	handleFunc(s, PathReadDir, ReadDir)
 	handleFunc(s, PathServeContent, ServeContent)
 	handleFunc(s, "/", Index)
 
@@ -78,82 +136,117 @@ func (s *Server) Close() error {
 	return nil
 }
 
+//go:embed tmpl/login.html
+var loginHTML string
+var loginTmpl = template.Must(commonTmpl().Parse(loginHTML))
+
 func Login(s *Server, w http.ResponseWriter, r *http.Request) {
-	if r.FormValue(s.C.Secret.Password) == "" {
+	page := struct {
+		Navbar      navbar
+		PathDoLogin string
+	}{
+		Navbar:      s.navbar(r),
+		PathDoLogin: PathDoLogin,
+	}
+	if err := loginTmpl.Execute(w, page); err != nil {
+		log.Printf("%+v", err)
+	}
+}
+
+func DoLogin(s *Server, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	origin, err := url.Parse(r.Header.Get("Origin"))
+	if err != nil || origin.Host != r.Host {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	password := r.FormValue("password")
+	if s.C.Secret.Password == "" || subtle.ConstantTimeCompare([]byte(password), []byte(s.C.Secret.Password)) != 1 {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     "sessionID",
-		Value:    "admin",
+		Name:     cookieSessionID,
+		Value:    s.currentSessionToken(),
+		Path:     "/",
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Now().AddDate(3, 0, 0),
 	})
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-//go:embed tmpl/viewdata.html
-var viewdataHTML string
-var viewdataTmpl = template.Must(commonTmpl().Parse(viewdataHTML))
+func Logout(s *Server, w http.ResponseWriter, r *http.Request) {
+	if err := s.rotateSessionToken(); err != nil {
+		log.Printf("%+v", err)
+	}
 
-func requireSession(w http.ResponseWriter, r *http.Request) bool {
-	if _, err := r.Cookie("sessionID"); err != nil {
+	http.SetCookie(w, &http.Cookie{
+		Name:   cookieSessionID,
+		MaxAge: -1,
+	})
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// isLoggedIn reports whether r carries a "sessionID" cookie matching the
+// current session token.
+func (s *Server) isLoggedIn(r *http.Request) bool {
+	cookie, err := r.Cookie(cookieSessionID)
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(s.currentSessionToken())) == 1
+}
+
+func requireSession(s *Server, w http.ResponseWriter, r *http.Request) bool {
+	if !s.isLoggedIn(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return false
 	}
 	return true
 }
 
-func ViewData(s *Server, w http.ResponseWriter, r *http.Request) {
-	if !requireSession(w, r) {
+//go:embed tmpl/readdir.html
+var readdirHTML string
+var readdirTmpl = template.Must(commonTmpl().Parse(readdirHTML))
+
+func ReadDir(s *Server, w http.ResponseWriter, r *http.Request) {
+	if !requireSession(s, w, r) {
 		return
 	}
-
 	pwd := r.FormValue("p")
 	if pwd == "" {
 		pwd = "."
 	}
 
-	info, err := s.Root.Stat(pwd)
-	if err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	if !info.IsDir() {
-		http.Error(w, "not a directory", http.StatusBadRequest)
-		return
-	}
-
-	f, err := s.Root.Open(pwd)
+	dirEntries, err := s.Root.FS().(fs.ReadDirFS).ReadDir(pwd)
 	if err != nil {
 		http.Error(w, "error", http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
 
-	dirEntries, err := f.ReadDir(-1)
-	if err != nil {
-		http.Error(w, "error", http.StatusInternalServerError)
-		return
-	}
-	sort.Slice(dirEntries, func(i, j int) bool { return dirEntries[i].Name() < dirEntries[j].Name() })
-
-	type viewDataEntry struct {
+	type readDirEntry struct {
 		Name    string
 		Href    string
 		IsDir   bool
 		SizeStr string
 		ModTime string
 	}
-	entries := make([]viewDataEntry, 0, len(dirEntries))
+	entries := make([]readDirEntry, 0, len(dirEntries))
 	for _, de := range dirEntries {
 		child := path.Join(pwd, de.Name())
 
-		entry := viewDataEntry{Name: html.EscapeString(de.Name()), IsDir: de.IsDir()}
+		entry := readDirEntry{Name: de.Name(), IsDir: de.IsDir()}
 		if de.IsDir() {
 			entry.Name += "/"
-			entry.Href = viewDataURL(child)
+			entry.Href = readDirURL(child)
 			entry.SizeStr = "-"
 		} else {
 			entry.Href = serveContentURL(child)
@@ -166,31 +259,33 @@ func ViewData(s *Server, w http.ResponseWriter, r *http.Request) {
 		}
 		entries = append(entries, entry)
 	}
+	slices.SortFunc(entries, func(a, b readDirEntry) int { return -cmp.Compare(a.Name, b.Name) })
 
 	page := struct {
 		Navbar     navbar
 		PWD        string
 		HasParent  bool
 		ParentHref string
-		Entries    []viewDataEntry
+		Entries    []readDirEntry
 	}{}
-	page.Navbar = s.navbar()
+	page.Navbar = s.navbar(r)
 	if pwd == "." {
 		page.PWD = "/"
 	} else {
-		page.PWD = html.EscapeString("/" + pwd)
+		page.PWD = "/" + pwd
 		page.HasParent = true
-		page.ParentHref = viewDataURL(path.Dir(pwd))
+		page.ParentHref = readDirURL(path.Dir(pwd))
 	}
 	page.Entries = entries
 
-	if err := viewdataTmpl.Execute(w, page); err != nil {
+	w.Header().Set("Cache-Control", "no-store")
+	if err := readdirTmpl.Execute(w, page); err != nil {
 		log.Printf("%+v", err)
 	}
 }
 
-func viewDataURL(pwd string) string {
-	urlStr := PathViewData
+func readDirURL(pwd string) string {
+	urlStr := PathReadDir
 	if pwd != "." && pwd != "" {
 		vals := url.Values{}
 		vals.Set("p", pwd)
@@ -199,8 +294,37 @@ func viewDataURL(pwd string) string {
 	return urlStr
 }
 
+func markupLog(data []byte) []byte {
+	events := make([][]byte, 0)
+	ev := make([]byte, 0)
+	lines := bytes.SplitSeq(data, []byte{'\n'})
+	for l := range lines {
+		if hasEventPrefix(l) {
+			events = append(events, ev)
+			ev = make([]byte, 0)
+		}
+
+		ev = append(ev, l...)
+		ev = append(ev, []byte("<br>")...)
+	}
+	events = append(events, ev)
+
+	htmlB := bytes.NewBuffer([]byte("<!DOCTYPE html><html><head><style>body{font-size: xxx-large;}</style></head><body><ul>"))
+	for _, ev := range slices.Backward(events) {
+		if len(bytes.TrimSpace(ev)) == 0 {
+			continue
+		}
+		htmlB.Write([]byte("<li>"))
+		htmlB.Write(ev)
+		htmlB.Write([]byte("</li>"))
+	}
+	htmlB.Write([]byte("</ul></body></html>"))
+
+	return htmlB.Bytes()
+}
+
 func ServeContent(s *Server, w http.ResponseWriter, r *http.Request) {
-	if !requireSession(w, r) {
+	if !requireSession(s, w, r) {
 		return
 	}
 
@@ -210,14 +334,28 @@ func ServeContent(s *Server, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "error", http.StatusInternalServerError)
 		return
 	}
-	f, err := s.Root.Open(fpath)
+	if info.IsDir() {
+		http.Error(w, "error", http.StatusBadRequest)
+		return
+	}
+	data, err := s.Root.ReadFile(fpath)
 	if err != nil {
 		http.Error(w, "error", http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
 
-	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
+	if path.Ext(info.Name()) == ".html" {
+		// Enforce CSP since LINE messages originate externally.
+		w.Header().Set("Content-Security-Policy", "script-src 'none'; object-src 'none'; frame-src 'none';")
+		// Force no-cache, since chat logs are often updated.
+		w.Header().Set("Cache-Control", "no-cache")
+		data = markupLog(data)
+	} else {
+		// Images can be cached long term.
+		w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	}
+
+	http.ServeContent(w, r, info.Name(), info.ModTime(), bytes.NewReader(data))
 }
 
 func serveContentURL(fpath string) string {
@@ -262,12 +400,16 @@ var navbarHTML string
 var navbarTmpl = template.Must(template.New("").Parse(navbarHTML))
 
 type navbar struct {
-	About string
+	LoggedIn   bool
+	PathLogin  string
+	PathLogout string
 }
 
-func (s *Server) navbar() navbar {
+func (s *Server) navbar(r *http.Request) navbar {
 	bar := navbar{}
-	bar.About = PathAbout
+	bar.LoggedIn = s.isLoggedIn(r)
+	bar.PathLogin = PathLogin
+	bar.PathLogout = PathLogout
 	return bar
 }
 
@@ -285,7 +427,7 @@ func About(s *Server, w http.ResponseWriter, r *http.Request) {
 		Navbar navbar
 		Email  string
 	}{}
-	page.Navbar = s.navbar()
+	page.Navbar = s.navbar(r)
 	page.Email = "awaw@nandalu.idv.tw"
 	if err := aboutTmpl.Execute(w, page); err != nil {
 		log.Printf("%+v", err)
@@ -298,9 +440,14 @@ var indexTmpl = template.Must(commonTmpl().Parse(indexHTML))
 
 func Index(s *Server, w http.ResponseWriter, r *http.Request) {
 	page := struct {
-		Navbar navbar
-	}{}
-	page.Navbar = s.navbar()
+		Navbar  navbar
+		ReadDir string
+		About   string
+	}{
+		Navbar:  s.navbar(r),
+		ReadDir: PathReadDir,
+		About:   PathAbout,
+	}
 	if err := indexTmpl.Execute(w, page); err != nil {
 		log.Printf("%+v", err)
 	}

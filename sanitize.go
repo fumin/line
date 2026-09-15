@@ -1,24 +1,39 @@
 package line
 
 import (
-	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
-// invalidChars matches characters that are illegal or awkward in a Linux
-// file name. '/' and NUL are the only characters the filesystem itself
-// forbids, but control characters are also replaced so names stay safe to
-// print and work with on the command line. Commas and spaces are also
-// replaced, since LINE group names commonly contain them (e.g. an
-// auto-generated name listing member names separated by ", ").
-var invalidChars = regexp.MustCompile(`[/\x00-\x1f\x7f, ]`)
+// stripInvisible replaces characters that are illegal, awkward, or unsafe
+// in a Linux file name with "_":
+//   - '/' and NUL, the only characters the filesystem itself forbids
+//   - other ASCII control characters
+//   - Unicode formatting characters (category Cf: bidirectional overrides
+//     like U+202E RIGHT-TO-LEFT OVERRIDE, zero-width characters, byte-order
+//     marks, ...)
+//   - commas and any kind of Unicode whitespace (not just ' '), since LINE
+//     group names commonly contain them (e.g. an auto-generated name
+//     listing member names separated by ", ")
+func stripInvisible(name string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '/', r == '\\', r == ',':
+			return '_'
+		case unicode.IsSpace(r), unicode.IsControl(r), unicode.Is(unicode.Cf, r):
+			return '_'
+		default:
+			return r
+		}
+	}, name)
+}
 
 // sanitizeFileName turns an arbitrary string (e.g. a LINE group name) into
 // a safe Linux file name component.
 func sanitizeFileName(name string) string {
 	name = strings.TrimSpace(name)
-	name = invalidChars.ReplaceAllString(name, "_")
+	name = stripInvisible(name)
 
 	// "." and ".." are reserved directory entries, and a name starting
 	// with "." would otherwise become a hidden file.

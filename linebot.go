@@ -3,11 +3,16 @@ package line
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
 
 const apiBase = "https://api.line.me"
+
+// apiDataBase is the host serving binary message content (images, video,
+// audio, files), as opposed to apiBase's JSON endpoints.
+const apiDataBase = "https://api-data.line.me"
 
 // Client is a minimal LINE Messaging API client for the read-only calls
 // this program needs (resolving group and user display names).
@@ -63,6 +68,37 @@ func (c *Client) GroupName(groupID string) (string, error) {
 		return "", err
 	}
 	return g.GroupName, nil
+}
+
+// MessageContent downloads the binary content of a message (e.g. an image,
+// video, audio, or file message), identified by its message ID. It returns
+// the content along with its Content-Type.
+func (c *Client) MessageContent(messageID string) ([]byte, string, error) {
+	if c.accessToken == "" {
+		return nil, "", fmt.Errorf("no channel access token configured")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, apiDataBase+"/v2/bot/message/"+messageID+"/content", nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.accessToken)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("line api message content returned status %d", resp.StatusCode)
+	}
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	return b, resp.Header.Get("Content-Type"), nil
 }
 
 // UserName fetches a user's display name. If groupID or roomID is set, the

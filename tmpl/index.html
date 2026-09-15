@@ -1,16 +1,17 @@
 <!DOCTYPE html>
 <html>
 <head>
-        <style>
-        </style>
+	<style>
+	</style>
 </head>
 <body>
-        {{template "navbar" .Navbar}}
+	{{template "navbar" .Navbar}}
 
-	<h1>hello</h1>
+	<h2><a href={{.ReadDir}}>Read directory</a></h2>
+	<a href={{.About}}>About</a>
 
 	<script>
 let page = {{.}};
-        </script>
+	</script>
 </body>
 </html>
