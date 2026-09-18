@@ -315,7 +315,7 @@ func markupLog(data []byte) []byte {
 			continue
 		}
 		htmlB.Write([]byte("<li>"))
-		htmlB.Write(ev)
+		htmlB.Write(util.MakeLinks(ev))
 		htmlB.Write([]byte("</li>"))
 	}
 	htmlB.Write([]byte("</ul></body></html>"))
