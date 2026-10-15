@@ -1,6 +1,7 @@
 package line
 
 import (
+	"path"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -35,6 +36,16 @@ func sanitizeFileName(name string) string {
 	name = strings.TrimSpace(name)
 	name = stripInvisible(name)
 
+	// Truncate name if it too long.
+	ext := path.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	const maxExtBytes = 16
+	if len(ext) > maxExtBytes {
+		ext = ext[:maxExtBytes]
+	}
+	base = truncateUTF8(base, 250-len(ext))
+	name = base + ext
+
 	// "." and ".." are reserved directory entries, and a name starting
 	// with "." would otherwise become a hidden file.
 	if strings.HasPrefix(name, ".") {
@@ -44,19 +55,21 @@ func sanitizeFileName(name string) string {
 		name = "_"
 	}
 
-	// Keep well under the common 255-byte filename limit even after
-	// appending ".txt".
-	const maxBytes = 200
-	if len(name) > maxBytes {
-		cut := maxBytes
-		for cut > 0 {
-			r, size := utf8.DecodeLastRuneInString(name[:cut])
-			if r != utf8.RuneError || size != 1 {
-				break
-			}
-			cut--
-		}
-		name = name[:cut]
-	}
 	return name
+}
+
+// truncateUTF8 cuts s to at most n bytes without splitting a multi-byte
+// character.
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for ; cut > 0; cut-- {
+		r, _ := utf8.DecodeLastRuneInString(s[:cut])
+		if r != utf8.RuneError {
+			break
+		}
+	}
+	return s[:cut]
 }

@@ -70,9 +70,14 @@ func (c *Client) GroupName(groupID string) (string, error) {
 	return g.GroupName, nil
 }
 
+// maxContentBytes limits the size of message content MessageContent
+// downloads, since the whole content is held in memory.
+const maxContentBytes = 50 << 20 // 50 MiB
+
 // MessageContent downloads the binary content of a message (e.g. an image,
 // video, audio, or file message), identified by its message ID. It returns
-// the content along with its Content-Type.
+// the content along with its Content-Type, or an error if the content is
+// larger than maxContentBytes.
 func (c *Client) MessageContent(messageID string) ([]byte, string, error) {
 	if c.accessToken == "" {
 		return nil, "", fmt.Errorf("no channel access token configured")
@@ -93,12 +98,23 @@ func (c *Client) MessageContent(messageID string) ([]byte, string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("line api message content returned status %d", resp.StatusCode)
 	}
-
-	b, err := io.ReadAll(resp.Body)
+	b, err := readLimited(resp.Body, maxContentBytes)
 	if err != nil {
 		return nil, "", err
 	}
 	return b, resp.Header.Get("Content-Type"), nil
+}
+
+// readLimited reads all of r, failing if it's longer than n bytes.
+func readLimited(r io.Reader, n int64) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, n+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) == n+1 {
+		return nil, fmt.Errorf("contents too long")
+	}
+	return b, nil
 }
 
 // UserName fetches a user's display name. If groupID or roomID is set, the

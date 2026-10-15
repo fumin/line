@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -15,12 +16,18 @@ type Config struct {
 }
 
 func Prod() (Config, error) {
-	secret, err := readSecret("/home/ec2-user/var/line/secret")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Config{}, errors.Wrap(err, "")
+	}
+	root := filepath.Join(home, "var/line")
+
+	secret, err := readSecret(filepath.Join(root, "secret"))
 	if err != nil {
 		return Config{}, errors.Wrap(err, "")
 	}
 	cfg := Config{
-		Dir:    "/home/ec2-user/var/line/data",
+		Dir:    filepath.Join(root, "data"),
 		Addr:   ":34282",
 		Secret: secret,
 	}

@@ -126,7 +126,7 @@ func NewServer(cfg config.Config) (*Server, error) {
 	handleFunc(s, PathAbout, About)
 	handleFunc(s, PathReadDir, ReadDir)
 	handleFunc(s, PathServeContent, ServeContent)
-	handleFunc(s, "/", Index)
+	handleFunc(s, "/{$}", Index)
 
 	return s, nil
 }

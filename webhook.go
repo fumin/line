@@ -10,6 +10,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/fumin/line/util"
@@ -115,9 +117,9 @@ func (h *WebhookHandler) chatName(src Source) string {
 }
 
 // describe renders a short human-readable summary of an event's content.
-// Image messages are downloaded and saved in a sub-folder (named after
-// chatName) of the day's log directory, with the returned summary an HTML
-// <a> tag linking to the saved file.
+// Image and PDF file messages are downloaded and saved in a sub-folder
+// (named after chatName) of the day's log directory, with the returned
+// summary an HTML <a> tag linking to the saved file.
 func (h *WebhookHandler) describe(ev Event, chatName string, t time.Time) string {
 	if ev.Type != "message" || ev.Message == nil {
 		return "[" + ev.Type + " event]"
@@ -127,7 +129,9 @@ func (h *WebhookHandler) describe(ev Event, chatName string, t time.Time) string
 	case "text":
 		return html.EscapeString(ev.Message.Text)
 	case "image":
-		return h.describeImage(ev.Message.ID, chatName, t)
+		return h.saveImage(ev.Message.ID, chatName, t)
+	case "file":
+		return h.saveFile(ev.Message, chatName, t)
 	case "":
 		return "[empty message]"
 	default:
@@ -135,14 +139,7 @@ func (h *WebhookHandler) describe(ev Event, chatName string, t time.Time) string
 	}
 }
 
-// describeImage downloads an image message's content via the Messaging API
-// and saves it under a chatName sub-folder of the day's log directory,
-// returning an HTML <a> tag linking to the saved file via ServeContent.
-func (h *WebhookHandler) describeImage(messageID, chatName string, t time.Time) string {
-	if h.Client == nil {
-		return "[image]"
-	}
-
+func (h *WebhookHandler) saveImage(messageID, chatName string, t time.Time) string {
 	data, contentType, err := h.Client.MessageContent(messageID)
 	if err != nil {
 		log.Printf("failed to download image %s: %v", messageID, err)
@@ -156,7 +153,7 @@ func (h *WebhookHandler) describeImage(messageID, chatName string, t time.Time) 
 		return "[image]"
 	}
 
-	return imageAnchor(relPath, name)
+	return fileAnchor(relPath, name)
 }
 
 // imageFileName names a saved image after the time it was sent, e.g.
@@ -178,10 +175,39 @@ func imageExt(contentType string) string {
 	}
 }
 
-// imageAnchor renders an HTML <a> tag linking to a saved image through
-// ServeContent. relPath is the image's path relative to the log directory,
-// as returned by LogWriter.SaveFile (e.g.
-// "2026-09-15/mychat/image_20260915_225150.jpg").
-func imageAnchor(relPath, name string) string {
+func (h *WebhookHandler) saveFile(msg *Message, chatName string, t time.Time) string {
+	// Ignore all files, except pdf files since they are safe to open in browsers.
+	if !isPDFName(msg.FileName) {
+		return "[file]"
+	}
+	// Skip a file LINE says is too big without downloading it; the size is
+	// reported by the sender's app, so MessageContent enforces the limit
+	// on the download as well.
+	if msg.FileSize > maxContentBytes {
+		log.Printf("file %s is %d bytes, over the %d byte limit", msg.ID, msg.FileSize, maxContentBytes)
+		return "[file]"
+	}
+
+	data, _, err := h.Client.MessageContent(msg.ID)
+	if err != nil {
+		log.Printf("failed to download file %s: %v", msg.ID, err)
+		return "[file]"
+	}
+
+	name := t.Format("20060102_150405") + "_" + msg.FileName
+	relPath, err := h.Writer.SaveFile(t, chatName, name, data)
+	if err != nil {
+		log.Printf("failed to save file %s: %v", msg.ID, err)
+		return "[file]"
+	}
+
+	return fileAnchor(relPath, msg.FileName)
+}
+
+func isPDFName(fileName string) bool {
+	return strings.EqualFold(path.Ext(fileName), ".pdf")
+}
+
+func fileAnchor(relPath, name string) string {
 	return fmt.Sprintf(`<a href="%s">%s</a>`, serveContentURL(relPath), html.EscapeString(name))
 }
