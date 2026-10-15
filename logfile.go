@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+const (
+	chatlogSuffix   = ".html"
+	chatFilesSuffix = ".files"
+)
+
 // LogWriter appends message lines to <root>/<YYYY-MM-DD>/<name>.html,
 // creating directories and files as needed. All filesystem access goes
 // through root, so a crafted chatName can never escape it. Lines may
@@ -38,7 +43,7 @@ func (w *LogWriter) Append(t time.Time, chatName, line string) error {
 		return fmt.Errorf("create log dir: %w", err)
 	}
 
-	fileName := sanitizeFileName(chatName) + ".html"
+	fileName := sanitizeFileName(chatName + chatlogSuffix)
 	filePath := filepath.Join(dateDir, fileName)
 
 	f, err := w.root.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
@@ -51,13 +56,13 @@ func (w *LogWriter) Append(t time.Time, chatName, line string) error {
 	return err
 }
 
-// SaveFile writes data to <root>/<YYYY-MM-DD>/<chatName>/<name>, creating
-// directories as needed, and returns the file's path relative to root
-// (using "/" as the separator, e.g. "2026-09-15/mychat/foo.jpg") for use
-// with ServeContent.
+// SaveFile writes data to <root>/<YYYY-MM-DD>/<chatName>.files/<name>,
+// creating directories as needed, and returns the file's path relative to
+// root (using "/" as the separator, e.g. "2026-09-15/mychat.files/foo.jpg")
+// for use with ServeContent.
 func (w *LogWriter) SaveFile(t time.Time, chatName, name string, data []byte) (string, error) {
 	dateDir := t.Format("2006-01-02")
-	subDir := sanitizeFileName(chatName)
+	subDir := sanitizeFileName(chatName + chatFilesSuffix)
 	dirPath := filepath.Join(dateDir, subDir)
 
 	w.mu.Lock()
@@ -67,7 +72,8 @@ func (w *LogWriter) SaveFile(t time.Time, chatName, name string, data []byte) (s
 		return "", fmt.Errorf("create log dir: %w", err)
 	}
 
-	filePath := filepath.Join(dirPath, name)
+	sanName := sanitizeFileName(name)
+	filePath := filepath.Join(dirPath, sanName)
 	if err := w.root.WriteFile(filePath, data, 0o600); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}

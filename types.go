@@ -28,4 +28,8 @@ type Message struct {
 	Type string `json:"type"` // "text", "image", "sticker", "video", ...
 	ID   string `json:"id"`
 	Text string `json:"text"`
+
+	// FileName and FileSize are set for "file" messages.
+	FileName string `json:"fileName"`
+	FileSize int64  `json:"fileSize"`
 }

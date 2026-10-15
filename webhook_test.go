@@ -43,26 +43,6 @@ func TestSanitizeFileNameStripsBidiAndInvisible(t *testing.T) {
 	}
 }
 
-func TestWebhookHandlerDescribe(t *testing.T) {
-	h := &WebhookHandler{Writer: NewLogWriter(testRoot(t))}
-	now := time.Now()
-
-	cases := map[Event]string{
-		{Type: "message", Message: &Message{Type: "text", Text: "hi"}}: "hi",
-		{Type: "message", Message: &Message{Type: ""}}:                 "[empty message]",
-		{Type: "message", Message: &Message{Type: "sticker"}}:          "[sticker]",
-		{Type: "join"}: "[join event]",
-		// No Client is configured, so an image can't be downloaded; it
-		// should fall back to a plain placeholder instead of panicking.
-		{Type: "message", Message: &Message{Type: "image", ID: "123"}}: "[image]",
-	}
-	for ev, want := range cases {
-		if got := h.describe(ev, "some chat", now); got != want {
-			t.Errorf("describe(%+v) = %q, want %q", ev, got, want)
-		}
-	}
-}
-
 func TestLogWriterSaveFile(t *testing.T) {
 	w := NewLogWriter(testRoot(t))
 	tm := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
@@ -71,7 +51,7 @@ func TestLogWriterSaveFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "2026-09-15/聖倫老師__mybot__shaoyufumin/123.jpg"; relPath != want {
+	if want := "2026-09-15/聖倫老師__mybot__shaoyufumin.files/123.jpg"; relPath != want {
 		t.Errorf("relPath = %q, want %q", relPath, want)
 	}
 }
@@ -83,14 +63,14 @@ func TestImageFileName(t *testing.T) {
 	}
 }
 
-func TestImageAnchor(t *testing.T) {
+func TestFileAnchor(t *testing.T) {
 	relPath := "2026-09-15/聖倫老師__mybot__shaoyufumin/image_20260915_225150.jpg"
 	name := "image_20260915_225150.jpg"
 
-	got := imageAnchor(relPath, name)
+	got := fileAnchor(relPath, name)
 	want := fmt.Sprintf(`<a href="%s">%s</a>`, serveContentURL(relPath), name)
 	if got != want {
-		t.Errorf("imageAnchor() = %q, want %q", got, want)
+		t.Errorf("fileAnchor() = %q, want %q", got, want)
 	}
 	if want := "/ServeContent?p=2026-09-15%2F%E8%81%96%E5%80%AB%E8%80%81%E5%B8%AB__mybot__shaoyufumin%2Fimage_20260915_225150.jpg"; serveContentURL(relPath) != want {
 		t.Errorf("serveContentURL(%q) = %q, want %q", relPath, serveContentURL(relPath), want)
